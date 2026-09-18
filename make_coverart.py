@@ -51,9 +51,9 @@ OUTFILE   = "housing_in_london_2026.png"
 DPI       = 300
 FIG_INCHES = (12, 12)
 
-STYLE     = "sketch"        # "clean" | "sketch" (hand-drawn / chalky / graphite)
+STYLE     = "clean"         # "clean" | "sketch" (hand-drawn / chalky / graphite)
 
-PALETTE   = "iridescent"    # "sunset" | "YlOrBr" | "iridescent" | "bright_seq"
+PALETTE   = "bright"        # "sunset" | "YlOrBr" | "iridescent" | "bright_seq" | "bright" | "muted"
 MAX_HEIGHT_KM = 17.0        # visual height of the tallest borough
 MIN_HEIGHT_KM = 0.8         # floor so every borough is a visible slab
 HEIGHT_GAMMA  = 0.85        # <1 lifts the smaller boroughs a little
@@ -65,13 +65,14 @@ AZIM = -90.0
 # lighting for the extruded side walls (azimuth the light comes FROM, degrees)
 LIGHT_AZIM = 135.0
 WALL_MIN, WALL_MAX = 0.50, 0.90   # brightness range across wall orientation
-WALL_BASE_DARKEN  = 0.62          # ambient-occlusion: wall shade at the ground
-WALL_SEGMENTS     = 22            # vertical subdivisions -> smooth wall gradient
+WALL_BASE_DARKEN  = 0.9          # ambient-occlusion: wall shade at the ground
+WALL_SHADOW_GREY  = (0.18, 0.18, 0.20)   # grey the wall shading blends toward (instead of pure black)
+WALL_SEGMENTS     = 1            # vertical subdivisions -> smooth wall gradient
 TOP_SHADE = 1.0                   # brightness of the top faces
 EDGE_TOP  = (0.10, 0.12, 0.16, 0.55)  # crisp outline, top faces only
-EDGE_LW   = 0.4
+EDGE_LW   = 0.4                   # thickness of edge lines (top)
 
-SIMPLIFY_DEG = 0.00035     # geometry simplification (~25 m); lower = crisper
+SIMPLIFY_DEG = 0.00055     # geometry simplification (~25 m); lower = crisper
 LABEL_TOP_N  = 0            # annotate the N tallest boroughs (0 = none)
 
 # --- hand-drawn / chalky "sketch" style -------------------------------------
@@ -107,7 +108,16 @@ TOL_SCHEMES = {
                    '#8DCBE4', '#7BBCE7', '#88A5DD', '#9B8AC4', '#9A709E',
                    '#805770', '#684957', '#46353A'],
     "bright_seq": ['#4477AA', '#66CCEE', '#228833', '#CCBB44', '#EE6677', '#AA3377'],
+    # Tol "Bright" qualitative scheme, reordered light->dark-ish so it reads
+    # sensibly when interpolated as a continuous ramp by height/value.
+    "bright": ['#4477AA', '#DDCC77', '#CC6677', '#88CCEE', '#117733', '#AA4499'],
+    # Tol "Muted" qualitative scheme, same idea.
+    "muted": ['#88CCEE', '#44AA99', '#117733', '#999933', '#DDCC77',
+              '#CC6677', '#882255', '#AA4499', '#332288'],
 }
+
+
+QUALITATIVE_PALETTES = {"bright", "bright_seq", "muted"}
 
 
 def tol_cmap(name):
@@ -175,6 +185,11 @@ def polygon_pieces(geom):
 def shade(rgb, factor):
     return tuple(min(1.0, c * factor) for c in rgb)
 
+def shade_toward_grey(rgb, factor, grey=WALL_SHADOW_GREY):
+    """Darken rgb by blending toward a chosen grey (instead of toward black).
+    factor=1 -> original colour, factor->0 -> pure `grey`."""
+    return tuple(min(1.0, c * factor + g * (1 - factor)) for c, g in zip(rgb, grey))
+
 
 def chalkify(rgb):
     """Mute a colour toward grey, then toward white — a soft chalk/pastel tint."""
@@ -189,7 +204,6 @@ def main():
     values = load_values()
     geoms = load_geometries()
     proj = make_projector(geoms)
-    cmap = tol_cmap(PALETTE)
 
     keys = [k for k in geoms if k in values]
     vmax = max(values[k]["value"] for k in keys)
@@ -199,9 +213,24 @@ def main():
         t = (v - vmin) / (vmax - vmin) if vmax > vmin else 0.0
         return MIN_HEIGHT_KM + (MAX_HEIGHT_KM - MIN_HEIGHT_KM) * (t ** HEIGHT_GAMMA)
 
-    def color_of(v):
-        t = (v - vmin) / (vmax - vmin) if vmax > vmin else 0.5
-        return chalkify(cmap(0.08 + 0.9 * t)[:3])   # trim the extreme-pale end
+    if PALETTE in QUALITATIVE_PALETTES:
+        # Qualitative palettes (Bright/Muted) have no intrinsic order, so
+        # interpolating between them produces muddy in-between blends.
+        # Instead, rank boroughs by value and cycle through solid colors —
+        # each borough gets one clean anchor color, none of them blended.
+        swatch = TOL_SCHEMES[PALETTE]
+        ranked = sorted(keys, key=lambda k: values[k]["value"])
+        rank_of = {k: i for i, k in enumerate(ranked)}
+
+        def color_of(v, k=None):
+            rgb = to_rgb(swatch[rank_of[k] % len(swatch)])
+            return chalkify(rgb)
+    else:
+        cmap = tol_cmap(PALETTE)
+
+        def color_of(v, k=None):
+            t = (v - vmin) / (vmax - vmin) if vmax > vmin else 0.5
+            return chalkify(cmap(0.08 + 0.9 * t)[:3])   # trim the extreme-pale end
 
     # light direction in the xy plane
     la = math.radians(LIGHT_AZIM)
@@ -218,7 +247,7 @@ def main():
     for k in keys:
         v = values[k]["value"]
         h = height_of(v)
-        base_rgb = color_of(v)
+        base_rgb = color_of(v, k)
 
         best_area = -1
         best_centroid = None
@@ -252,7 +281,7 @@ def main():
                     vert = WALL_BASE_DARKEN + (1 - WALL_BASE_DARKEN) * frac
                     faces.append([(x0, y0, z0), (x1, y1, z0),
                                   (x1, y1, z1), (x0, y0, z1)])
-                    facecolors.append((*shade(base_rgb, b * vert), 1.0))
+                    facecolors.append((*shade_toward_grey(base_rgb, b * vert), 1.0))
                     edgecolors.append(EDGE_WALL)
 
             # track biggest piece for optional labelling
